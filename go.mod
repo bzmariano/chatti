@@ -1,0 +1,3 @@
+module Chatti
+
+go 1.22.0
