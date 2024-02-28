@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -11,10 +13,11 @@ import (
 
 const (
 	Port        = "9090"
-	SafeMode    = true
+	SafeMode    = false
 	MessageRate = 1.0
 	StrikeLimit = 3
 	BanLimit    = 5 * 60 // minutes
+	BufSize     = 32
 )
 
 func sensitive(msg string) string {
@@ -44,7 +47,70 @@ type Client struct {
 	StrikeCount int
 }
 
-func client(conn net.Conn, ch chan Message) {
+func authorized(conn net.Conn, token string) error {
+	buffer := make([]byte, BufSize*2)
+	n, err := conn.Read(buffer)
+
+	switch {
+	case n < len(buffer):
+		return errors.New(fmt.Sprintf("Incomplete read of token: %v/%v\n", n, len(buffer)))
+	case !utf8.Valid(buffer):
+		return errors.New(fmt.Sprintf("Token is not a valid UTF8 string: %v\n", err))
+	case token != string(buffer):
+		return errors.New("User provided an invalid token")
+	default:
+		return err
+	}
+}
+
+func client(conn net.Conn, ch chan Message, token string) {
+	clientAddr := conn.RemoteAddr()
+	if clientAddr == nil {
+		slog.Error("Could not get address from sender\n")
+		conn.Close()
+		return
+	}
+
+	// ask for auth token
+	_, err := conn.Write([]byte("Token: "))
+	if err != nil {
+		slog.Info(
+			fmt.Sprintf("Could not send Token prompt to %v: %v\n",
+				sensitive(clientAddr.String()),
+				sensitive(err.Error())))
+		conn.Close()
+		return
+	}
+
+	// authorization guard
+	if err := authorized(conn, token); err != nil {
+		slog.Error(
+			fmt.Sprintf("Reading authorization token from %v: %v\n",
+				sensitive(clientAddr.String()),
+				sensitive(err.Error())))
+
+		// tell user about error
+		_, err = conn.Write([]byte("Invalid authorization token\n"))
+		if err != nil {
+			slog.Info(
+				fmt.Sprintf("Could not notify client %v about invalid token: %v\n",
+					sensitive(clientAddr.String()),
+					sensitive(err.Error())))
+		}
+
+		conn.Close()
+		return
+	}
+
+	slog.Info(fmt.Sprintf("%v is authorized!", sensitive(clientAddr.String())))
+	_, err = conn.Write([]byte("Welcome to Chatti!\n"))
+	if err != nil {
+		slog.Info(
+			fmt.Sprintf("Could not greet client %v: %v\n",
+				sensitive(clientAddr.String()),
+				sensitive(err.Error())))
+	}
+
 	ch <- Message{
 		Type: ClientConnected,
 		Conn: conn,
@@ -109,6 +175,7 @@ func server(ch chan Message) {
 			clientAddr := msg.Conn.RemoteAddr().(*net.TCPAddr)
 			client := clients[clientAddr.String()]
 
+			// guard against pending messages from banned user
 			if client == nil {
 				msg.Conn.Close()
 				continue
@@ -146,6 +213,16 @@ func server(ch chan Message) {
 }
 
 func main() {
+	buffer := make([]byte, BufSize)
+	_, err := rand.Read(buffer)
+	if err != nil {
+		slog.Error(fmt.Sprintf("Could not generate a access token: %v", err))
+		return
+	}
+
+	token := fmt.Sprintf("%02x", buffer)
+	slog.Info(token)
+
 	ln, err := net.Listen("tcp", ":"+Port)
 	if err != nil {
 		slog.Error(fmt.Sprintf("Could not start server on port %v\n%v\n", Port, sensitive(err.Error())))
@@ -166,6 +243,6 @@ func main() {
 
 		slog.Info(fmt.Sprintf("Accepted connection from %v\n", sensitive(conn.RemoteAddr().String())))
 
-		go client(conn, ch)
+		go client(conn, ch, token)
 	}
 }
