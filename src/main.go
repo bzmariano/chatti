@@ -13,14 +13,14 @@ import (
 
 const (
 	Port        = "9090"
-	SafeMode    = false
+	SafeMode    = true
 	MessageRate = 1.0
 	StrikeLimit = 3
 	BanLimit    = 5 * 60 // minutes
 	BufSize     = 16
 )
 
-func sensitive(msg string) string {
+func censure(msg string) string {
 	if SafeMode {
 		return "[REDACTED]"
 	}
@@ -97,14 +97,14 @@ func server(ch chan Message, token string) {
 				t := BanLimit - time.Now().Sub(bannedAt).Seconds()
 				if 0 < t && t < BanLimit {
 					msg.Conn.Write([]byte(fmt.Sprintf("You are banned for %v seconds\n", t)))
-					slog.Info(fmt.Sprintf("Client %v is banned", sensitive(clientAddr.String())))
+					slog.Info(fmt.Sprintf("Client %v is banned", censure(clientAddr.String())))
 					msg.Conn.Close()
 				} else {
 					delete(bannedMfs, clientAddr.IP.String())
 				}
 			}
 
-			slog.Info(fmt.Sprintf("Client %v connected\n", sensitive(clientAddr.String())))
+			slog.Info(fmt.Sprintf("Client %v connected\n", censure(clientAddr.String())))
 			clients[msg.Conn.RemoteAddr().String()] = &Client{
 				Conn:        msg.Conn,
 				LastMessage: time.Now(),
@@ -115,14 +115,14 @@ func server(ch chan Message, token string) {
 			if err != nil {
 				slog.Info(
 					fmt.Sprintf("Could not send Token prompt to %v: %v\n",
-						sensitive(clientAddr.String()),
-						sensitive(err.Error())))
+						censure(clientAddr.String()),
+						censure(err.Error())))
 				msg.Conn.Close()
 			}
 
 		case ClientDisconnected:
 			clientAddr := msg.Conn.RemoteAddr().(*net.TCPAddr)
-			slog.Info(fmt.Sprintf("Client %v disconnected\n", sensitive(clientAddr.String())))
+			slog.Info(fmt.Sprintf("Client %v disconnected\n", censure(clientAddr.String())))
 			delete(clients, clientAddr.String())
 
 		case NewMessage:
@@ -139,13 +139,13 @@ func server(ch chan Message, token string) {
 			if now.Sub(client.LastMessage).Seconds() < MessageRate {
 				client.StrikeCount += 1
 				if client.StrikeCount >= StrikeLimit {
-					slog.Info(fmt.Sprintf("Client %v got banned", sensitive(clientAddr.String())))
+					slog.Info(fmt.Sprintf("Client %v got banned", censure(clientAddr.String())))
 					_, err := client.Conn.Write([]byte("You are banned\n"))
 					if err != nil {
 						slog.Info(
 							fmt.Sprintf("Could not send Token prompt to %v: %v\n",
-								sensitive(clientAddr.String()),
-								sensitive(err.Error())))
+								censure(clientAddr.String()),
+								censure(err.Error())))
 					}
 					client.Conn.Close()
 					bannedMfs[clientAddr.IP.String()] = now
@@ -166,12 +166,13 @@ func server(ch chan Message, token string) {
 			// auth guard
 			if !client.authed {
 				if token != strings.TrimSpace(msg.Text) {
+					slog.Info(fmt.Sprintf("%v Failed authorization", censure(clientAddr.String())))
 					_, err := msg.Conn.Write([]byte("Invalid authorization token\n"))
 					if err != nil {
 						slog.Info(
 							fmt.Sprintf("Could not notify client %v about invalid token: %v\n",
-								sensitive(clientAddr.String()),
-								sensitive(err.Error())))
+								censure(clientAddr.String()),
+								censure(err.Error())))
 					}
 					delete(clients, clientAddr.String())
 					msg.Conn.Close()
@@ -180,8 +181,8 @@ func server(ch chan Message, token string) {
 				if err != nil {
 					slog.Info(
 						fmt.Sprintf("Could not greet %v: %v\n",
-							sensitive(clientAddr.String()),
-							sensitive(err.Error())))
+							censure(clientAddr.String()),
+							censure(err.Error())))
 				}
 				slog.Info(fmt.Sprintf("Client %v is authorized\n", clientAddr))
 				client.authed = true
@@ -190,7 +191,7 @@ func server(ch chan Message, token string) {
 			client.LastMessage = now
 			slog.Info(
 				fmt.Sprintf("Client %v sent message: %v",
-					sensitive(clientAddr.String()),
+					censure(clientAddr.String()),
 					msg.Text))
 
 			for _, v := range clients {
@@ -215,7 +216,7 @@ func main() {
 
 	ln, err := net.Listen("tcp", ":"+Port)
 	if err != nil {
-		slog.Error(fmt.Sprintf("Could not start server on port %v\n%v\n", Port, sensitive(err.Error())))
+		slog.Error(fmt.Sprintf("Could not start server on port %v\n%v\n", Port, censure(err.Error())))
 		os.Exit(1)
 	}
 
@@ -227,11 +228,11 @@ func main() {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			slog.Error(fmt.Sprintf("Could not accept the connection: %v\n", sensitive(err.Error())))
+			slog.Error(fmt.Sprintf("Could not accept the connection: %v\n", censure(err.Error())))
 			continue
 		}
 
-		slog.Info(fmt.Sprintf("Accepted connection from %v\n", sensitive(conn.RemoteAddr().String())))
+		slog.Info(fmt.Sprintf("Accepted connection from %v\n", censure(conn.RemoteAddr().String())))
 
 		go client(conn, ch)
 	}
