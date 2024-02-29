@@ -2,6 +2,14 @@
 
 Simple Multi-User Chat
 
+Layers:
+- Ban Limit
+- Rate Limit
+- Text Filter
+- Auth
+- Broadcasting of messages
+
+
 ## Quick Start
 
 '''console

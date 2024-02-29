@@ -2,11 +2,11 @@ package main
 
 import (
 	"crypto/rand"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -17,7 +17,7 @@ const (
 	MessageRate = 1.0
 	StrikeLimit = 3
 	BanLimit    = 5 * 60 // minutes
-	BufSize     = 32
+	BufSize     = 16
 )
 
 func sensitive(msg string) string {
@@ -45,70 +45,15 @@ type Client struct {
 	Conn        net.Conn
 	LastMessage time.Time
 	StrikeCount int
+	authed      bool
 }
 
-func authorized(conn net.Conn, token string) error {
-	buffer := make([]byte, BufSize*2)
-	n, err := conn.Read(buffer)
-
-	switch {
-	case n < len(buffer):
-		return errors.New(fmt.Sprintf("Incomplete read of token: %v/%v\n", n, len(buffer)))
-	case !utf8.Valid(buffer):
-		return errors.New(fmt.Sprintf("Token is not a valid UTF8 string: %v\n", err))
-	case token != string(buffer):
-		return errors.New("User provided an invalid token")
-	default:
-		return err
-	}
-}
-
-func client(conn net.Conn, ch chan Message, token string) {
+func client(conn net.Conn, ch chan Message) {
 	clientAddr := conn.RemoteAddr()
 	if clientAddr == nil {
 		slog.Error("Could not get address from sender\n")
 		conn.Close()
 		return
-	}
-
-	// ask for auth token
-	_, err := conn.Write([]byte("Token: "))
-	if err != nil {
-		slog.Info(
-			fmt.Sprintf("Could not send Token prompt to %v: %v\n",
-				sensitive(clientAddr.String()),
-				sensitive(err.Error())))
-		conn.Close()
-		return
-	}
-
-	// authorization guard
-	if err := authorized(conn, token); err != nil {
-		slog.Error(
-			fmt.Sprintf("Reading authorization token from %v: %v\n",
-				sensitive(clientAddr.String()),
-				sensitive(err.Error())))
-
-		// tell user about error
-		_, err = conn.Write([]byte("Invalid authorization token\n"))
-		if err != nil {
-			slog.Info(
-				fmt.Sprintf("Could not notify client %v about invalid token: %v\n",
-					sensitive(clientAddr.String()),
-					sensitive(err.Error())))
-		}
-
-		conn.Close()
-		return
-	}
-
-	slog.Info(fmt.Sprintf("%v is authorized!", sensitive(clientAddr.String())))
-	_, err = conn.Write([]byte("Welcome to Chatti!\n"))
-	if err != nil {
-		slog.Info(
-			fmt.Sprintf("Could not greet client %v: %v\n",
-				sensitive(clientAddr.String()),
-				sensitive(err.Error())))
 	}
 
 	ch <- Message{
@@ -137,7 +82,7 @@ func client(conn net.Conn, ch chan Message, token string) {
 	}
 }
 
-func server(ch chan Message) {
+func server(ch chan Message, token string) {
 	clients := make(map[string]*Client)
 	bannedMfs := make(map[string]time.Time)
 	for {
@@ -163,6 +108,16 @@ func server(ch chan Message) {
 			clients[msg.Conn.RemoteAddr().String()] = &Client{
 				Conn:        msg.Conn,
 				LastMessage: time.Now(),
+				authed:      false,
+			}
+
+			_, err := msg.Conn.Write([]byte("Token: "))
+			if err != nil {
+				slog.Info(
+					fmt.Sprintf("Could not send Token prompt to %v: %v\n",
+						sensitive(clientAddr.String()),
+						sensitive(err.Error())))
+				msg.Conn.Close()
 			}
 
 		case ClientDisconnected:
@@ -178,15 +133,23 @@ func server(ch chan Message) {
 			// guard against pending messages from banned user
 			if client == nil {
 				msg.Conn.Close()
-				continue
 			}
 
 			// ddos guard
 			if now.Sub(client.LastMessage).Seconds() < MessageRate {
 				client.StrikeCount += 1
 				if client.StrikeCount >= StrikeLimit {
-					bannedMfs[clientAddr.IP.String()] = now
+					slog.Info(fmt.Sprintf("Client %v got banned", sensitive(clientAddr.String())))
+					_, err := client.Conn.Write([]byte("You are banned\n"))
+					if err != nil {
+						slog.Info(
+							fmt.Sprintf("Could not send Token prompt to %v: %v\n",
+								sensitive(clientAddr.String()),
+								sensitive(err.Error())))
+					}
 					client.Conn.Close()
+					bannedMfs[clientAddr.IP.String()] = now
+					delete(clients, clientAddr.String())
 				}
 				continue
 			}
@@ -196,15 +159,42 @@ func server(ch chan Message) {
 				client.StrikeCount += 1
 				if client.StrikeCount >= StrikeLimit {
 					bannedMfs[clientAddr.IP.String()] = now
-					client.Conn.Close()
+					msg.Conn.Close()
 				}
-				continue
+			}
+
+			// auth guard
+			if !client.authed {
+				if token != strings.TrimSpace(msg.Text) {
+					_, err := msg.Conn.Write([]byte("Invalid authorization token\n"))
+					if err != nil {
+						slog.Info(
+							fmt.Sprintf("Could not notify client %v about invalid token: %v\n",
+								sensitive(clientAddr.String()),
+								sensitive(err.Error())))
+					}
+					delete(clients, clientAddr.String())
+					msg.Conn.Close()
+				}
+				_, err := msg.Conn.Write([]byte("Welcome to Chatti!\n"))
+				if err != nil {
+					slog.Info(
+						fmt.Sprintf("Could not greet %v: %v\n",
+							sensitive(clientAddr.String()),
+							sensitive(err.Error())))
+				}
+				slog.Info(fmt.Sprintf("Client %v is authorized\n", clientAddr))
+				client.authed = true
 			}
 
 			client.LastMessage = now
-			slog.Info(fmt.Sprintf("Client %v sent message: %v\n", sensitive(clientAddr.String()), msg.Text))
+			slog.Info(
+				fmt.Sprintf("Client %v sent message: %v",
+					sensitive(clientAddr.String()),
+					msg.Text))
+
 			for _, v := range clients {
-				if v.Conn.RemoteAddr().String() != clientAddr.String() {
+				if v.authed && v.Conn.RemoteAddr().String() != clientAddr.String() {
 					_, _ = v.Conn.Write([]byte(msg.Text))
 				}
 			}
@@ -232,7 +222,7 @@ func main() {
 	slog.Info(fmt.Sprintf("Listening to TCP connections on port %v ...\n", Port))
 
 	ch := make(chan Message)
-	go server(ch)
+	go server(ch, token)
 
 	for {
 		conn, err := ln.Accept()
@@ -243,6 +233,6 @@ func main() {
 
 		slog.Info(fmt.Sprintf("Accepted connection from %v\n", sensitive(conn.RemoteAddr().String())))
 
-		go client(conn, ch, token)
+		go client(conn, ch)
 	}
 }
