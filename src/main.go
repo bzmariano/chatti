@@ -219,11 +219,13 @@ func main() {
 		slog.Error(fmt.Sprintf("Could not start server on port %v\n%v\n", Port, censure(err.Error())))
 		os.Exit(1)
 	}
+	defer ln.Close()
 
 	slog.Info(fmt.Sprintf("Listening to TCP connections on port %v ...\n", Port))
 
 	ch := make(chan Message)
 	go server(ch, token)
+	defer close(ch)
 
 	for {
 		conn, err := ln.Accept()
